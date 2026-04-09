@@ -1,18 +1,6 @@
-
-/**
- * fork-manager — sync.js
- * Syncs all GitHub forks for an authenticated user with their upstream repos.
- *
- * Author: ModelNorth
- * License: MIT
- */
-
 const https = require("https");
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
-
 const TOKEN = process.env.PAT_TOKEN;
-const USERNAME = process.env.GITHUB_ACTOR || process.env.GH_USERNAME;
 const DRY_RUN = process.env.DRY_RUN === "true";
 const FORCE_SYNC = process.env.FORCE_SYNC === "true";
 
@@ -20,8 +8,6 @@ const EXCLUDE_LIST = (process.env.EXCLUDE_REPOS || "")
   .split(",")
   .map((r) => r.trim().toLowerCase())
   .filter(Boolean);
-
-// ─── HELPERS ─────────────────────────────────────────────────────────────────
 
 function apiRequest(method, path, body = null) {
   return new Promise((resolve, reject) => {
@@ -37,7 +23,6 @@ function apiRequest(method, path, body = null) {
         ...(body ? { "Content-Type": "application/json" } : {}),
       },
     };
-
     const req = https.request(options, (res) => {
       let data = "";
       res.on("data", (chunk) => (data += chunk));
@@ -49,7 +34,6 @@ function apiRequest(method, path, body = null) {
         }
       });
     });
-
     req.on("error", reject);
     if (body) req.write(JSON.stringify(body));
     req.end();
@@ -59,75 +43,46 @@ function apiRequest(method, path, body = null) {
 async function getAllForks() {
   let page = 1;
   let forks = [];
-
   while (true) {
-    const res = await apiRequest(
-      "GET",
-      `/user/repos?type=fork&per_page=100&page=${page}`
-    );
-
-    if (res.status !== 200) {
-      throw new Error(`Failed to fetch repos: ${JSON.stringify(res.body)}`);
-    }
-
+    const res = await apiRequest("GET", `/user/repos?type=fork&per_page=100&page=${page}`);
+    if (res.status !== 200) throw new Error(`Failed to fetch repos: ${JSON.stringify(res.body)}`);
     const batch = res.body;
     if (!batch.length) break;
-
     forks = forks.concat(batch);
     if (batch.length < 100) break;
     page++;
   }
-
   return forks;
 }
 
 async function syncFork(owner, repo, defaultBranch) {
-  return await apiRequest(
-    "POST",
-    `/repos/${owner}/${repo}/merge-upstream`,
-    { branch: defaultBranch }
-  );
+  return await apiRequest("POST", `/repos/${owner}/${repo}/merge-upstream`, { branch: defaultBranch });
 }
 
-// ─── MAIN ────────────────────────────────────────────────────────────────────
-
 async function main() {
-  if (!TOKEN) {
-    console.error("❌ PAT_TOKEN environment variable is not set.");
-    process.exit(1);
-  }
+  if (!TOKEN) { console.error("❌ PAT_TOKEN not set."); process.exit(1); }
 
   console.log("╔════════════════════════════════════════╗");
   console.log("║        fork-manager by ModelNorth       ║");
   console.log("╚════════════════════════════════════════╝\n");
 
-  if (DRY_RUN) console.log("🔍 DRY RUN MODE — no actual syncs will happen\n");
+  if (DRY_RUN) console.log("🔍 DRY RUN MODE\n");
   if (FORCE_SYNC) console.log("⚡ FORCE SYNC enabled\n");
-  if (EXCLUDE_LIST.length > 0) {
-    console.log(`🚫 Excluded: ${EXCLUDE_LIST.join(", ")}\n`);
-  }
+  if (EXCLUDE_LIST.length > 0) console.log(`🚫 Excluded: ${EXCLUDE_LIST.join(", ")}\n`);
 
   console.log("📡 Fetching all forks...");
   const forks = await getAllForks();
   console.log(`✅ Found ${forks.length} fork(s)\n`);
 
   if (forks.length === 0) {
-    console.log("ℹ️  No forks found in this account. Nothing to sync.");
+    console.log("ℹ️  No forks found. Nothing to sync.");
     process.exit(0);
   }
 
-  const results = {
-    synced: [],
-    skipped: [],
-    alreadyUpToDate: [],
-    conflicts: [],
-    errors: [],
-  };
+  const results = { synced: [], skipped: [], alreadyUpToDate: [], conflicts: [], errors: [] };
 
   for (const fork of forks) {
-    const repoName = fork.name;
-    const ownerLogin = fork.owner.login;
-    const defaultBranch = fork.default_branch;
+    const { name: repoName, owner: { login: ownerLogin }, default_branch: defaultBranch } = fork;
 
     if (EXCLUDE_LIST.includes(repoName.toLowerCase())) {
       console.log(`⏭  [EXCLUDED]   ${ownerLogin}/${repoName}`);
@@ -143,7 +98,6 @@ async function main() {
 
     try {
       const res = await syncFork(ownerLogin, repoName, defaultBranch);
-
       if (res.status === 200) {
         const msg = res.body.message || "";
         if (msg.toLowerCase().includes("already")) {
@@ -167,29 +121,24 @@ async function main() {
       console.log(`❌ [ERROR]      ${ownerLogin}/${repoName} — ${err.message}`);
       results.errors.push(repoName);
     }
-
     await new Promise((r) => setTimeout(r, 300));
   }
-
-  // ─── SUMMARY ───────────────────────────────────────────────────────────────
 
   console.log("\n╔════════════════════════════════════════╗");
   console.log("║              SYNC SUMMARY               ║");
   console.log("╚════════════════════════════════════════╝");
-  console.log(`🔄 Synced (new commits pulled):  ${results.synced.length}`);
-  console.log(`✅ Already up to date:           ${results.alreadyUpToDate.length}`);
-  console.log(`⏭  Excluded / skipped:           ${results.skipped.length}`);
-  console.log(`⚠️  Conflicts (needs manual fix): ${results.conflicts.length}`);
-  console.log(`❌ Errors:                        ${results.errors.length}`);
+  console.log(`🔄 Synced:             ${results.synced.length}`);
+  console.log(`✅ Already up to date: ${results.alreadyUpToDate.length}`);
+  console.log(`⏭  Skipped/excluded:   ${results.skipped.length}`);
+  console.log(`⚠️  Conflicts:          ${results.conflicts.length}`);
+  console.log(`❌ Errors:             ${results.errors.length}`);
   console.log(`─────────────────────────────────────────`);
-  console.log(`📦 Total forks processed:        ${forks.length}`);
+  console.log(`📦 Total processed:    ${forks.length}`);
 
   if (results.conflicts.length > 0) {
-    console.log(`\n⚠️  Conflicted repos:`);
+    console.log(`\n⚠️  Conflicted repos (re-run with force_sync to overwrite):`);
     results.conflicts.forEach((r) => console.log(`   • ${r}`));
-    console.log(`\n   Re-run with FORCE_SYNC=true to overwrite.`);
   }
-
   if (results.errors.length > 0) {
     console.log(`\n❌ Failed repos:`);
     results.errors.forEach((r) => console.log(`   • ${r}`));
@@ -197,18 +146,4 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error("Fatal error:", err);
-  process.exit(1);
-});
-```
-
----
-
-Key change — added this at the end of `getAllForks`:
-
-```javascript
-if (forks.length === 0) {
-  console.log("ℹ️  No forks found in this account. Nothing to sync.");
-  process.exit(0);
-}
+main().catch((err) => { console.error("Fatal error:", err); process.exit(1); });
